@@ -4,6 +4,7 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 from ..models.image_model import SUPPORTED_EXTENSIONS
+from . import icons
 
 WINDOW_TITLE = "Pics Viewer"
 WINDOW_WIDTH = 900
@@ -44,7 +45,7 @@ class MainView(tk.Tk):
     toolbar = ttk.Frame(self, padding=(12, 10))
     toolbar.pack(side=tk.TOP, fill=tk.X)
 
-    self.open_button = ttk.Button(toolbar, text="Abrir imagen")
+    self.open_button = ttk.Button(toolbar, **icons.button_options("folder", "Abrir imagen"))
     self.open_button.pack(side=tk.LEFT)
 
     self.status = ttk.Label(self, text="Listo", relief=tk.SUNKEN, anchor=tk.W, padding=(8, 4))
