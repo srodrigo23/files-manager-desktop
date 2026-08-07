@@ -16,9 +16,13 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 APP_FOLDER = "PicsViewer"
 DATABASE_FILENAME = "preferences.db"
 
-# Claves de ajustes, con su valor por defecto.
+# Ajustes que el usuario cambia desde la modal, con su valor por defecto.
 CONFIRM_DELETE = "confirm_delete"
 DEFAULT_SETTINGS = {CONFIRM_DELETE: True}
+
+# Estado de sesion: no se edita a mano, lo escribe la app al usarse.
+LAST_IMAGE = "last_image"
+WINDOW_GEOMETRY = "window_geometry"
 
 
 class Base(DeclarativeBase):
@@ -109,29 +113,36 @@ class PreferencesRepository:
 
   # --- Ajustes de la app ---
 
-  def get_flag(self, key, default):
+  def get_value(self, key, default=None):
     if not self.available:
       return default
     try:
       with self._new_session() as session:
         stored = session.get(AppSetting, key)
-        return stored.value == "1" if stored else default
+        return stored.value if stored else default
     except SQLAlchemyError:
       return default
 
-  def set_flag(self, key, value):
+  def set_value(self, key, value):
     if not self.available:
       return
     try:
       with self._new_session() as session:
         stored = session.get(AppSetting, key)
         if stored:
-          stored.value = "1" if value else "0"
+          stored.value = value
         else:
-          session.add(AppSetting(key=key, value="1" if value else "0"))
+          session.add(AppSetting(key=key, value=value))
         session.commit()
     except SQLAlchemyError:
       pass
+
+  def get_flag(self, key, default):
+    stored = self.get_value(key)
+    return default if stored is None else stored == "1"
+
+  def set_flag(self, key, value):
+    self.set_value(key, "1" if value else "0")
 
 
 def default_database_path():

@@ -1,3 +1,4 @@
+import re
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
@@ -11,6 +12,8 @@ from .widgets import IconButton
 WINDOW_TITLE = "Pics Viewer"
 WINDOW_WIDTH = 900
 WINDOW_HEIGHT = 600
+MIN_WIDTH = 480
+MIN_HEIGHT = 320
 EMPTY_MESSAGE = "No hay ninguna imagen abierta"
 CANVAS_BACKGROUND = "#1e1e1e"
 EMPTY_TEXT_COLOR = "#8a8a8a"
@@ -29,12 +32,13 @@ RESIZE_DELAY_MS = 60
 class MainView(tk.Tk):
   """Ventana principal. Solo dibuja: la logica vive en el controlador."""
 
-  def __init__(self):
+  def __init__(self, geometry=None):
     super().__init__()
 
     self.title(WINDOW_TITLE)
     self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
-    self.minsize(480, 320)
+    self.minsize(MIN_WIDTH, MIN_HEIGHT)
+    self._saved_geometry = geometry
 
     self._source_image = None
     self._image_name = None
@@ -49,7 +53,9 @@ class MainView(tk.Tk):
     self._settings_dialog = None
 
     self._build_widgets()
-    self._center_on_screen()
+    # Solo centramos si no habia una posicion guardada que siga siendo valida.
+    if not self._restore_geometry(geometry):
+      self._center_on_screen()
     # Arrancamos con la lista lista para recibir teclas, sin pedir un clic.
     self.focus_file_list()
 
@@ -181,6 +187,36 @@ class MainView(tk.Tk):
 
     return panel
 
+  def _restore_geometry(self, spec):
+    """Recupera tamano y posicion de la sesion anterior, si siguen sirviendo.
+
+    La pantalla pudo cambiar desde entonces (monitor desconectado, resolucion
+    distinta): una ventana fuera de los limites seria inalcanzable.
+    """
+    if not spec:
+      return False
+
+    match = re.fullmatch(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", spec)
+    if not match:
+      return False
+
+    width, height, x, y = (int(value) for value in match.groups())
+    if width < MIN_WIDTH or height < MIN_HEIGHT:
+      return False
+
+    # Exigimos que quede una franja visible por la que agarrar la ventana.
+    visible_margin = 100
+    if not -width + visible_margin <= x <= self.winfo_screenwidth() - visible_margin:
+      return False
+    if not 0 <= y <= self.winfo_screenheight() - visible_margin:
+      return False
+
+    self.geometry(spec)
+    return True
+
+  def current_geometry(self):
+    return self.geometry()
+
   def _center_on_screen(self):
     """Coloca la ventana en el centro de la pantalla."""
     self.update_idletasks()
@@ -265,6 +301,13 @@ class MainView(tk.Tk):
 
   def bind_settings(self, handler):
     self.settings_button.configure(command=handler)
+
+  def bind_close(self, handler):
+    """Intercepta el cierre para poder guardar estado antes de salir."""
+    self.protocol("WM_DELETE_WINDOW", handler)
+
+  def close(self):
+    self.destroy()
 
   def show_settings(self, values, on_change):
     """Abre la modal de ajustes, o trae al frente la que ya estaba abierta."""

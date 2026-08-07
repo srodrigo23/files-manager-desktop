@@ -207,20 +207,25 @@ class ImageModel:
     self._notify()
 
   def _scan(self, directory):
-    try:
-      entries = [
-        entry
-        for entry in directory.iterdir()
-        if entry.is_file() and entry.suffix.lower() in SUPPORTED_EXTENSIONS
-      ]
-    except OSError:
-      # Carpeta sin permisos o desmontada: seguimos con la imagen ya abierta.
-      return []
-    return sorted(entries, key=_sort_key)
+    return scan_folder(directory)
 
   def _notify(self):
     for callback in self._observers:
       callback(self)
+
+
+def scan_folder(directory):
+  """Imagenes soportadas de una carpeta, ordenadas por nombre."""
+  try:
+    entries = [
+      entry
+      for entry in Path(directory).iterdir()
+      if entry.is_file() and entry.suffix.lower() in SUPPORTED_EXTENSIONS
+    ]
+  except OSError:
+    # Carpeta sin permisos o desmontada: seguimos con la imagen ya abierta.
+    return []
+  return sorted(entries, key=_sort_key)
 
 
 def _sort_key(path):

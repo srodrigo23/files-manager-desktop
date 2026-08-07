@@ -1,4 +1,12 @@
-from ..models.preferences import CONFIRM_DELETE, DEFAULT_SETTINGS
+from pathlib import Path
+
+from ..models.image_model import scan_folder
+from ..models.preferences import (
+  CONFIRM_DELETE,
+  DEFAULT_SETTINGS,
+  LAST_IMAGE,
+  WINDOW_GEOMETRY,
+)
 
 
 class MainController:
@@ -20,6 +28,7 @@ class MainController:
     self.view.bind_delete(self.on_delete_image)
     self.view.bind_rename(self.on_rename_image)
     self.view.bind_settings(self.on_open_settings)
+    self.view.bind_close(self.on_close)
     self.view.bind_navigation(self.on_previous_image, self.on_next_image)
     self.view.bind_actions(
       self.on_activate_actions,
@@ -32,7 +41,33 @@ class MainController:
     self.model.subscribe(self.on_model_changed)
 
   def run(self):
+    self.restore_session()
     self.view.mainloop()
+
+  def restore_session(self):
+    """Reabre lo ultimo que se estaba viendo, si sigue estando ahi."""
+    if self._preferences is None:
+      return
+
+    stored = self._preferences.get_value(LAST_IMAGE)
+    if not stored:
+      return
+
+    last = Path(stored)
+    if last.is_file():
+      self._load(last, quiet=True)
+      return
+
+    # El archivo ya no esta (renombrado, movido, borrado): al menos abrimos
+    # su carpeta, que es lo que el usuario estaba mirando.
+    remaining = scan_folder(last.parent)
+    if remaining:
+      self._load(remaining[0], quiet=True)
+
+  def on_close(self):
+    if self._preferences:
+      self._preferences.set_value(WINDOW_GEOMETRY, self.view.current_geometry())
+    self.view.close()
 
   def on_open_image(self):
     path = self.view.ask_image_path()
@@ -126,6 +161,8 @@ class MainController:
       self.view.show_error(f"No se pudo renombrar:\n{error}")
       return
 
+    # La ruta cambio: la sesion debe recordar el nombre nuevo.
+    self._remember_current()
     if was_active:
       self._set_actions_active(True)
 
@@ -166,13 +203,23 @@ class MainController:
     self.view.show_metadata(model.metadata)
     self.view.show_image(model.image, model.path.name, model.rotation)
 
-  def _load(self, path):
-    """Carga la imagen. Devuelve False si no se pudo leer."""
+  def _load(self, path, quiet=False):
+    """Carga la imagen. Devuelve False si no se pudo leer.
+
+    quiet evita el dialogo de error al restaurar la sesion: que la imagen de
+    la vez pasada ya no sirva no es motivo para recibir al usuario con un aviso.
+    """
     try:
       self.model.load(path)
+      self._remember_current()
       return True
     except (OSError, ValueError) as error:
-      self.view.show_error(f"No se pudo abrir la imagen:\n{error}")
-      # La lista quedo marcando el archivo fallido: la devolvemos al actual.
-      self.view.show_file_list([item.name for item in self.model.files], self.model.index)
+      if not quiet:
+        self.view.show_error(f"No se pudo abrir la imagen:\n{error}")
+        # La lista quedo marcando el archivo fallido: la devolvemos al actual.
+        self.view.show_file_list([item.name for item in self.model.files], self.model.index)
       return False
+
+  def _remember_current(self):
+    if self._preferences and self.model.path:
+      self._preferences.set_value(LAST_IMAGE, str(self.model.path))
