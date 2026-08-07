@@ -1,10 +1,11 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from PIL import Image, ImageTk
 
 from ..models.image_model import SUPPORTED_EXTENSIONS
 from . import icons
+from .widgets import IconButton
 
 WINDOW_TITLE = "Pics Viewer"
 WINDOW_WIDTH = 900
@@ -14,6 +15,8 @@ CANVAS_BACKGROUND = "#1e1e1e"
 EMPTY_TEXT_COLOR = "#8a8a8a"
 CANVAS_PADDING = 12
 SIDEBAR_WIDTH = 240
+METADATA_WIDTH = 320
+ACTION_ICON_TINT = "#ffffff"
 # Espera antes de re-escalar mientras el usuario arrastra el borde de la ventana.
 RESIZE_DELAY_MS = 60
 
@@ -35,6 +38,7 @@ class MainView(tk.Tk):
     self._resize_job = None
     self._file_names = []
     self._file_position = None
+    self._rotation = 0
     self._syncing_list = False
     self._sash_placed = False
 
@@ -45,11 +49,13 @@ class MainView(tk.Tk):
     toolbar = ttk.Frame(self, padding=(12, 10))
     toolbar.pack(side=tk.TOP, fill=tk.X)
 
-    self.open_button = ttk.Button(toolbar, **icons.button_options("folder", "Abrir imagen"))
+    self.open_button = IconButton(toolbar, "Abrir imagen", icon=icons.load("img.png"))
     self.open_button.pack(side=tk.LEFT)
 
     self.status = ttk.Label(self, text="Listo", relief=tk.SUNKEN, anchor=tk.W, padding=(8, 4))
     self.status.pack(side=tk.BOTTOM, fill=tk.X)
+
+    self._build_actions()
 
     # El divisor deja al usuario ajustar cuanto espacio ocupa la lista.
     self.body = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
@@ -60,14 +66,36 @@ class MainView(tk.Tk):
     self.canvas = tk.Canvas(self.body, background=CANVAS_BACKGROUND, highlightthickness=0)
     self.canvas.bind("<Configure>", self._on_canvas_resize)
     self.body.add(self.canvas, weight=1)
+
+    self.body.add(self._build_metadata(self.body), weight=0)
     self.body.bind("<Configure>", self._on_body_configure)
 
   def _on_body_configure(self, event):
-    # El sash solo admite una posicion cuando el panel ya tiene ancho real.
+    # Los sash solo admiten una posicion cuando el panel ya tiene ancho real.
     if self._sash_placed or event.width <= 1:
       return
     self._sash_placed = True
+    # De derecha a izquierda: mover el de la izquierda primero empuja al otro.
+    self.body.sashpos(1, event.width - METADATA_WIDTH)
     self.body.sashpos(0, SIDEBAR_WIDTH)
+
+  def _build_actions(self):
+    """Barra inferior de acciones sobre la imagen que se esta viendo."""
+    actions = ttk.Frame(self, padding=(12, 10))
+    actions.pack(side=tk.BOTTOM, fill=tk.X)
+    ttk.Separator(self, orient=tk.HORIZONTAL).pack(side=tk.BOTTOM, fill=tk.X)
+
+    # Los iconos vienen en negro: los tenimos de blanco para que se lean
+    # sobre el azul del boton.
+    self.rotate_left_button = IconButton(
+      actions, "Rotar izquierda", icon=icons.load("rotate-left.png", tint=ACTION_ICON_TINT)
+    )
+    self.rotate_left_button.pack(side=tk.LEFT)
+
+    self.rotate_right_button = IconButton(
+      actions, "Rotar derecha", icon=icons.load("rotate-right.png", tint=ACTION_ICON_TINT)
+    )
+    self.rotate_right_button.pack(side=tk.LEFT, padx=(8, 0))
 
   def _build_sidebar(self, parent):
     sidebar = ttk.Frame(parent, width=SIDEBAR_WIDTH, padding=(8, 0, 0, 8))
@@ -90,6 +118,33 @@ class MainView(tk.Tk):
     scrollbar.configure(command=self.files_list.yview)
 
     return sidebar
+
+  def _build_metadata(self, parent):
+    panel = ttk.Frame(parent, width=METADATA_WIDTH, padding=(0, 0, 8, 8))
+
+    ttk.Label(panel, text="Detalles", padding=(2, 6)).pack(side=tk.TOP, fill=tk.X)
+
+    scrollbar = ttk.Scrollbar(panel, orient=tk.VERTICAL)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # Un arbol de dos columnas agrupa los datos por seccion sin widgets extra.
+    self.metadata_tree = ttk.Treeview(
+      panel,
+      columns=("valor",),
+      show="tree",
+      selectmode="browse",
+      yscrollcommand=scrollbar.set,
+    )
+    # Sangria chica: los nombres de campo entran sin cortarse en 320 px.
+    ttk.Style().configure("Metadata.Treeview", indent=10)
+    self.metadata_tree.configure(style="Metadata.Treeview")
+    self.metadata_tree.column("#0", width=115, minwidth=90, stretch=False)
+    self.metadata_tree.column("valor", width=175, minwidth=80, stretch=True)
+    self.metadata_tree.tag_configure("seccion", font=_section_font())
+    self.metadata_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scrollbar.configure(command=self.metadata_tree.yview)
+
+    return panel
 
   def _center_on_screen(self):
     """Coloca la ventana en el centro de la pantalla."""
@@ -151,6 +206,8 @@ class MainView(tk.Tk):
   def _update_status(self, zoom):
     width, height = self._source_image.size
     parts = [self._image_name, f"{width} x {height} px", f"{round(zoom * 100)}%"]
+    if self._rotation:
+      parts.append(f"rotada {self._rotation}°")
     if self._file_position is not None:
       position, total = self._file_position
       parts.append(f"{position} de {total}")
@@ -160,6 +217,10 @@ class MainView(tk.Tk):
 
   def bind_open_image(self, handler):
     self.open_button.configure(command=handler)
+
+  def bind_rotate(self, on_left, on_right):
+    self.rotate_left_button.configure(command=on_left)
+    self.rotate_right_button.configure(command=on_right)
 
   def bind_select_file(self, handler):
     """El handler recibe el indice elegido en la lista."""
@@ -207,13 +268,23 @@ class MainView(tk.Tk):
 
     self.files_header.configure(text=f"Carpeta  ({len(names)})" if names else "Carpeta")
 
-  def show_image(self, image, name):
+  def show_metadata(self, sections):
+    """Vuelca [(titulo, [(campo, valor), ...])] en el panel de detalles."""
+    self.metadata_tree.delete(*self.metadata_tree.get_children())
+
+    for title, rows in sections:
+      parent = self.metadata_tree.insert("", tk.END, text=title, open=True, tags=("seccion",))
+      for label, value in rows:
+        self.metadata_tree.insert(parent, tk.END, text=label, values=(value,))
+
+  def show_image(self, image, name, rotation=0):
     # Tkinter no dibuja modos como P o CMYK: normalizamos antes de mostrar.
     if image.mode not in ("RGB", "RGBA", "L"):
       image = image.convert("RGBA")
 
     self._source_image = image
     self._image_name = name
+    self._rotation = rotation
     self.title(f"{name} - {WINDOW_TITLE}")
     self._render()
 
@@ -224,8 +295,21 @@ class MainView(tk.Tk):
     self.title(WINDOW_TITLE)
     self.status.configure(text="Listo")
     self.show_file_list([], -1)
+    self.show_metadata([])
     self._render()
 
   def show_error(self, message):
     messagebox.showerror("Pics Viewer", message, parent=self)
     self.status.configure(text=message)
+
+
+# Tk borra las fuentes que se quedan sin referencias: la guardamos aparte.
+_section_font_cache = None
+
+
+def _section_font():
+  global _section_font_cache
+  if _section_font_cache is None:
+    _section_font_cache = tkfont.nametofont("TkDefaultFont").copy()
+    _section_font_cache.configure(weight="bold")
+  return _section_font_cache

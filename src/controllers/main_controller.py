@@ -7,6 +7,7 @@ class MainController:
 
     self.view.bind_open_image(self.on_open_image)
     self.view.bind_select_file(self.on_select_file)
+    self.view.bind_rotate(self.on_rotate_left, self.on_rotate_right)
     self.model.subscribe(self.on_model_changed)
 
   def run(self):
@@ -25,13 +26,20 @@ class MainController:
       return
     self._load(files[index])
 
+  def on_rotate_left(self):
+    self.model.rotate(-90)
+
+  def on_rotate_right(self):
+    self.model.rotate(90)
+
   def on_model_changed(self, model):
     if not model.has_image:
       self.view.clear_image()
       return
 
     self.view.show_file_list([path.name for path in model.files], model.index)
-    self.view.show_image(model.image, model.path.name)
+    self.view.show_metadata(model.metadata)
+    self.view.show_image(model.image, model.path.name, model.rotation)
 
   def _load(self, path):
     try:

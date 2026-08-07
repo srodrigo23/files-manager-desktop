@@ -2,8 +2,29 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+from . import metadata
+
+# Las fotos del iPhone son HEIC: Pillow no las abre sin este registro.
+try:
+  from pillow_heif import register_heif_opener
+
+  register_heif_opener()
+  HEIF_EXTENSIONS = (".heic", ".heif")
+except ImportError:
+  HEIF_EXTENSIONS = ()
+
 # Formatos que aceptamos en el dialogo de apertura.
-SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff")
+SUPPORTED_EXTENSIONS = (
+  ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", *HEIF_EXTENSIONS
+)
+
+# Grados en sentido horario -> operacion de Pillow. transpose es exacto y
+# barato: no reinterpola pixeles como lo haria rotate().
+_ROTATIONS = {
+  90: Image.Transpose.ROTATE_270,
+  180: Image.Transpose.ROTATE_180,
+  270: Image.Transpose.ROTATE_90,
+}
 
 
 class ImageModel:
@@ -12,6 +33,9 @@ class ImageModel:
   def __init__(self):
     self._path = None
     self._image = None
+    self._rotation = 0
+    self._rotated = None
+    self._metadata = []
     self._directory = None
     self._files = []
     self._observers = []
@@ -22,7 +46,16 @@ class ImageModel:
 
   @property
   def image(self):
-    return self._image
+    """La imagen como debe verse: el original mas la rotacion de la sesion."""
+    if self._image is None or self._rotation == 0:
+      return self._image
+    if self._rotated is None:
+      self._rotated = self._image.transpose(_ROTATIONS[self._rotation])
+    return self._rotated
+
+  @property
+  def rotation(self):
+    return self._rotation
 
   @property
   def has_image(self):
@@ -30,7 +63,12 @@ class ImageModel:
 
   @property
   def size(self):
-    return self._image.size if self._image else None
+    return self.image.size if self._image else None
+
+  @property
+  def metadata(self):
+    """Secciones [(titulo, [(campo, valor), ...])] de la imagen abierta."""
+    return self._metadata
 
   @property
   def files(self):
@@ -70,6 +108,19 @@ class ImageModel:
 
     self._path = path
     self._image = image
+    # Cada imagen empieza sin rotar; los metadatos describen el archivo tal
+    # como esta en disco, no como lo estemos viendo.
+    self._rotation = 0
+    self._rotated = None
+    self._metadata = metadata.extract(path, image)
+    self._notify()
+
+  def rotate(self, degrees):
+    """Gira la presentacion en multiplos de 90. No modifica el archivo."""
+    if self._image is None:
+      return
+    self._rotation = (self._rotation + degrees) % 360
+    self._rotated = None
     self._notify()
 
   def load_at(self, index):
@@ -80,6 +131,9 @@ class ImageModel:
   def clear(self):
     self._path = None
     self._image = None
+    self._rotation = 0
+    self._rotated = None
+    self._metadata = []
     self._directory = None
     self._files = []
     self._notify()
