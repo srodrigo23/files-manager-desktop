@@ -1,10 +1,11 @@
 import tkinter as tk
-from tkinter import filedialog, font as tkfont, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageTk
 
 from ..models.image_model import SUPPORTED_EXTENSIONS
 from . import icons
+from .settings_dialog import SettingsDialog
 from .widgets import IconButton
 
 WINDOW_TITLE = "Pics Viewer"
@@ -17,6 +18,10 @@ CANVAS_PADDING = 12
 SIDEBAR_WIDTH = 240
 METADATA_WIDTH = 320
 ACTION_ICON_TINT = "#ffffff"
+DANGER_COLORS = ("#c5453c", "#d65a50", "#a3332c")
+NEUTRAL_COLORS = ("#6b7280", "#7d8592", "#565c66")
+HINT_INACTIVE = "↑ ↓ cambiar imagen    ·    supr eliminar    ·    Enter activa la rotación"
+HINT_ACTIVE = "← → rotar    ·    supr eliminar    ·    Esc salir"
 # Espera antes de re-escalar mientras el usuario arrastra el borde de la ventana.
 RESIZE_DELAY_MS = 60
 
@@ -41,9 +46,12 @@ class MainView(tk.Tk):
     self._rotation = 0
     self._syncing_list = False
     self._sash_placed = False
+    self._settings_dialog = None
 
     self._build_widgets()
     self._center_on_screen()
+    # Arrancamos con la lista lista para recibir teclas, sin pedir un clic.
+    self.focus_file_list()
 
   def _build_widgets(self):
     toolbar = ttk.Frame(self, padding=(12, 10))
@@ -51,6 +59,14 @@ class MainView(tk.Tk):
 
     self.open_button = IconButton(toolbar, "Abrir imagen", icon=icons.load("img.png"))
     self.open_button.pack(side=tk.LEFT)
+
+    self.settings_button = IconButton(
+      toolbar,
+      "Configuración",
+      icon=icons.load("setting.png", tint=ACTION_ICON_TINT),
+      colors=NEUTRAL_COLORS,
+    )
+    self.settings_button.pack(side=tk.RIGHT)
 
     self.status = ttk.Label(self, text="Listo", relief=tk.SUNKEN, anchor=tk.W, padding=(8, 4))
     self.status.pack(side=tk.BOTTOM, fill=tk.X)
@@ -96,6 +112,25 @@ class MainView(tk.Tk):
       actions, "Rotar derecha", icon=icons.load("rotate-right.png", tint=ACTION_ICON_TINT)
     )
     self.rotate_right_button.pack(side=tk.LEFT, padx=(8, 0))
+
+    self.rename_button = IconButton(
+      actions, "Renombrar", icon=icons.load("edit-text.png", tint=ACTION_ICON_TINT)
+    )
+    self.rename_button.pack(side=tk.LEFT, padx=(8, 0))
+
+    # Separado del resto y en rojo: es la unica accion destructiva.
+    self.delete_button = IconButton(
+      actions,
+      "Eliminar",
+      icon=icons.load("delete.png", tint=ACTION_ICON_TINT),
+      colors=DANGER_COLORS,
+    )
+    self.delete_button.pack(side=tk.RIGHT)
+
+    # Un modo sin indicador es un modo invisible: el texto dice que teclas
+    # estan vivas en cada momento.
+    self.actions_hint = ttk.Label(actions, text=HINT_INACTIVE, padding=(12, 0))
+    self.actions_hint.pack(side=tk.LEFT)
 
   def _build_sidebar(self, parent):
     sidebar = ttk.Frame(parent, width=SIDEBAR_WIDTH, padding=(8, 0, 0, 8))
@@ -222,6 +257,86 @@ class MainView(tk.Tk):
     self.rotate_left_button.configure(command=on_left)
     self.rotate_right_button.configure(command=on_right)
 
+  def bind_delete(self, handler):
+    self.delete_button.configure(command=handler)
+
+  def bind_rename(self, handler):
+    self.rename_button.configure(command=handler)
+
+  def bind_settings(self, handler):
+    self.settings_button.configure(command=handler)
+
+  def show_settings(self, values, on_change):
+    """Abre la modal de ajustes, o trae al frente la que ya estaba abierta."""
+    if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
+      self._settings_dialog.lift()
+      return self._settings_dialog
+
+    self._settings_dialog = SettingsDialog(self, values, on_change)
+    return self._settings_dialog
+
+  def ask_new_name(self, current_stem, suffix):
+    """Pide el nombre nuevo. Devuelve None si el usuario cancela.
+
+    Solo se edita el nombre: la extension se conserva, porque cambiarla no
+    convierte el archivo y romperia como lo reconoce el visor.
+    """
+    return simpledialog.askstring(
+      "Renombrar imagen",
+      f"Nuevo nombre (se conserva «{suffix}»):",
+      initialvalue=current_stem,
+      parent=self,
+    )
+
+  def bind_navigation(self, on_previous, on_next):
+    """Flechas arriba/abajo para cambiar de imagen desde cualquier parte."""
+    self._bind_key("<Up>", on_previous)
+    self._bind_key("<Down>", on_next)
+
+  def bind_actions(self, on_activate, on_cancel, on_rotate_left, on_rotate_right, on_delete):
+    """Enter habilita las acciones sobre la imagen; Esc vuelve atras."""
+    self._bind_key("<Return>", on_activate)
+    self._bind_key("<KP_Enter>", on_activate)
+    self._bind_key("<Escape>", on_cancel)
+    self._bind_key("<Left>", on_rotate_left)
+    self._bind_key("<Right>", on_rotate_right)
+    # En los teclados Mac la tecla de borrar manda BackSpace; los teclados
+    # completos mandan Delete con la de suprimir. Aceptamos las dos.
+    self._bind_key("<Delete>", on_delete)
+    self._bind_key("<BackSpace>", on_delete)
+
+  def set_actions_active(self, active):
+    self.actions_hint.configure(text=HINT_ACTIVE if active else HINT_INACTIVE)
+
+  def focus_file_list(self):
+    self.files_list.focus_set()
+
+  def _bind_key(self, sequence, handler):
+    def callback(_event):
+      # Dentro del arbol de detalles las teclas son suyas: ahi el usuario
+      # esta recorriendo filas, no operando sobre la imagen.
+      if self.focus_get() is self.metadata_tree:
+        return None
+      handler()
+      return "break"
+
+    # En la ventana: cubre el foco en el canvas o en un boton. En la lista:
+    # sus bindings de clase moverian la seleccion o el scroll por su cuenta,
+    # asi que los interceptamos para que todo pase por un solo camino.
+    self.bind(sequence, callback)
+    self.files_list.bind(sequence, callback)
+
+  def confirm_delete(self, name):
+    """Pide confirmacion antes de mandar el archivo a la papelera."""
+    return messagebox.askyesno(
+      "Eliminar imagen",
+      f"¿Mover «{name}» a la papelera?",
+      detail="Podras recuperarlo desde la papelera del sistema.",
+      icon=messagebox.WARNING,
+      default=messagebox.NO,
+      parent=self,
+    )
+
   def bind_select_file(self, handler):
     """El handler recibe el indice elegido en la lista."""
 
@@ -255,6 +370,9 @@ class MainView(tk.Tk):
         self.files_list.delete(0, tk.END)
         if names:
           self.files_list.insert(tk.END, *names)
+          # Carpeta nueva: devolvemos el foco a la lista, que es desde donde
+          # se navega. El dialogo de archivos se lo habia llevado.
+          self.focus_file_list()
 
       self.files_list.selection_clear(0, tk.END)
       if 0 <= current_index < len(names):
