@@ -53,7 +53,7 @@ def _file_rows(path):
   if created:
     rows.append(("Creado", _format_date(created)))
   rows.append(("Modificado", _format_date(stat.st_mtime)))
-  rows.append(("Peso", _format_size(stat.st_size)))
+  rows.append(("Peso", format_size(stat.st_size)))
   return rows
 
 
@@ -168,12 +168,17 @@ def _format_date(timestamp):
   return datetime.fromtimestamp(timestamp).strftime(DATE_FORMAT)
 
 
-def _format_size(size):
+def format_size(size):
   for unit in ("B", "KB", "MB", "GB"):
     if size < 1024 or unit == "GB":
       return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
     size /= 1024
   return f"{size:.1f} GB"
+
+
+def format_short_date(timestamp):
+  """Fecha compacta para la tabla de archivos."""
+  return datetime.fromtimestamp(timestamp).strftime("%d/%m/%y")
 
 
 def _format_ratio(width, height):

@@ -19,6 +19,11 @@ SUPPORTED_EXTENSIONS = (
   ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", *HEIF_EXTENSIONS
 )
 
+# Criterios de orden de la lista de archivos.
+SORT_NAME = "name"
+SORT_SIZE = "size"
+SORT_MODIFIED = "modified"
+
 # Grados en sentido horario -> operacion de Pillow. transpose es exacto y
 # barato: no reinterpola pixeles como lo haria rotate().
 _ROTATIONS = {
@@ -41,6 +46,9 @@ class ImageModel:
     self._metadata = []
     self._directory = None
     self._files = []
+    # El orden no se recuerda entre sesiones: cada arranque empieza por nombre.
+    self._sort_key = SORT_NAME
+    self._sort_descending = False
     self._observers = []
 
   @property
@@ -103,11 +111,11 @@ class ImageModel:
     # Solo releemos el disco al cambiar de carpeta, no al saltar entre vecinas.
     if path.parent != self._directory:
       self._directory = path.parent
-      self._files = self._scan(path.parent)
+      self._files = self._sorted(scan_folder(path.parent))
 
     # Un archivo con extension fuera de la lista igual merece estar visible.
     if path not in self._files:
-      self._files = sorted([*self._files, path], key=_sort_key)
+      self._files = self._sorted([*self._files, path])
 
     self._path = path
     self._image = image
@@ -117,6 +125,20 @@ class ImageModel:
     self._rotated = None
     self._metadata = metadata.extract(path, image)
     self._notify()
+
+  def set_sort(self, key, descending):
+    """Reordena la carpeta. Cambia tambien el orden de navegacion con flechas."""
+    self._sort_key = key
+    self._sort_descending = descending
+    self._files = self._sorted(self._files)
+    self._notify()
+
+  def _sorted(self, files):
+    return sorted(
+      files,
+      key=lambda path: sort_value(path, self._sort_key),
+      reverse=self._sort_descending,
+    )
 
   def rotate(self, degrees):
     """Gira la presentacion en multiplos de 90. No modifica el archivo."""
@@ -160,9 +182,7 @@ class ImageModel:
       self._preferences.forget(previous)
       self._preferences.save_rotation(target, self._rotation)
 
-    self._files = sorted(
-      [item for item in self._files if item != previous] + [target], key=_sort_key
-    )
+    self._files = self._sorted([item for item in self._files if item != previous] + [target])
     self._path = target
     self._metadata = metadata.extract(target, self._image)
     self._notify()
@@ -206,12 +226,21 @@ class ImageModel:
     self._files = []
     self._notify()
 
-  def _scan(self, directory):
-    return scan_folder(directory)
-
   def _notify(self):
     for callback in self._observers:
       callback(self)
+
+
+def sort_value(path, key):
+  """Valor por el que ordenar una imagen segun el criterio elegido."""
+  if key != SORT_NAME:
+    try:
+      stat = path.stat()
+    except OSError:
+      # Archivo desaparecido entre el escaneo y el orden: al final de la lista.
+      return 0
+    return stat.st_size if key == SORT_SIZE else stat.st_mtime
+  return path.name.lower()
 
 
 def scan_folder(directory):

@@ -16,6 +16,21 @@ OPTIONS = (
     "Si lo desactivas, la imagen se manda a la papelera al instante.\n"
     "Seguira siendo recuperable desde la papelera del sistema.",
   ),
+  (
+    "show_files",
+    "Mostrar la lista de archivos",
+    "El panel izquierdo con las imagenes de la carpeta.",
+  ),
+  (
+    "show_details",
+    "Mostrar el panel de detalles",
+    "El panel derecho con los metadatos de la imagen.",
+  ),
+  (
+    "cycle_navigation",
+    "Navegacion circular",
+    "Al llegar a la ultima imagen, la flecha abajo vuelve a la primera.",
+  ),
 )
 
 

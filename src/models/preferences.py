@@ -18,11 +18,21 @@ DATABASE_FILENAME = "preferences.db"
 
 # Ajustes que el usuario cambia desde la modal, con su valor por defecto.
 CONFIRM_DELETE = "confirm_delete"
-DEFAULT_SETTINGS = {CONFIRM_DELETE: True}
+SHOW_FILES = "show_files"
+SHOW_DETAILS = "show_details"
+CYCLE_NAVIGATION = "cycle_navigation"
+DEFAULT_SETTINGS = {
+  CONFIRM_DELETE: True,
+  SHOW_FILES: True,
+  SHOW_DETAILS: True,
+  CYCLE_NAVIGATION: True,
+}
 
 # Estado de sesion: no se edita a mano, lo escribe la app al usarse.
 LAST_IMAGE = "last_image"
 WINDOW_GEOMETRY = "window_geometry"
+FILES_WIDTH = "files_width"
+DETAILS_WIDTH = "details_width"
 
 
 class Base(DeclarativeBase):

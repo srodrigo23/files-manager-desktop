@@ -16,9 +16,18 @@ MIN_WIDTH = 480
 MIN_HEIGHT = 320
 EMPTY_MESSAGE = "No hay ninguna imagen abierta"
 CANVAS_BACKGROUND = "#1e1e1e"
+BORDER_COLOR = "#c3c3c3"
 EMPTY_TEXT_COLOR = "#8a8a8a"
 CANVAS_PADDING = 12
-SIDEBAR_WIDTH = 240
+SIDEBAR_WIDTH = 350
+FILE_COLUMNS = ("name", "size", "modified")
+# (columna, titulo, ancho, alineacion)
+FILE_COLUMN_LAYOUT = (
+  ("name", "Nombre", 165, tk.W),
+  ("size", "Tamaño", 75, tk.E),
+  ("modified", "Modificado", 90, tk.CENTER),
+)
+SORT_ARROWS = {True: "  ▼", False: "  ▲"}
 METADATA_WIDTH = 320
 ACTION_ICON_TINT = "#ffffff"
 DANGER_COLORS = ("#c5453c", "#d65a50", "#a3332c")
@@ -47,10 +56,15 @@ class MainView(tk.Tk):
     self._resize_job = None
     self._file_names = []
     self._file_position = None
+    self._folder_total = None
     self._rotation = 0
     self._syncing_list = False
     self._sash_placed = False
     self._settings_dialog = None
+    self._show_files = True
+    self._show_details = True
+    self._files_width = SIDEBAR_WIDTH
+    self._details_width = METADATA_WIDTH
 
     self._build_widgets()
     # Solo centramos si no habia una posicion guardada que siga siendo valida.
@@ -79,27 +93,53 @@ class MainView(tk.Tk):
 
     self._build_actions()
 
-    # El divisor deja al usuario ajustar cuanto espacio ocupa la lista.
+    # El divisor deja al usuario ajustar cuanto espacio ocupa cada panel.
     self.body = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
     self.body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-    self.body.add(self._build_sidebar(self.body), weight=0)
-
+    self.sidebar = self._build_sidebar(self.body)
     self.canvas = tk.Canvas(self.body, background=CANVAS_BACKGROUND, highlightthickness=0)
     self.canvas.bind("<Configure>", self._on_canvas_resize)
-    self.body.add(self.canvas, weight=1)
+    self.details = self._build_metadata(self.body)
 
-    self.body.add(self._build_metadata(self.body), weight=0)
+    self._arrange_panes()
     self.body.bind("<Configure>", self._on_body_configure)
+
+  def _arrange_panes(self):
+    """Rearma el divisor con los paneles visibles, en su orden natural."""
+    for pane in (self.sidebar, self.canvas, self.details):
+      if str(pane) in self.body.panes():
+        self.body.forget(pane)
+
+    if self._show_files:
+      self.body.add(self.sidebar, weight=0)
+    self.body.add(self.canvas, weight=1)
+    if self._show_details:
+      self.body.add(self.details, weight=0)
+
+    self._place_sashes()
+
+  def _place_sashes(self):
+    self.update_idletasks()
+    total = self.body.winfo_width()
+    if total <= 1:
+      # Aun sin tamano real: lo hara el <Configure> cuando lo tenga.
+      self._sash_placed = False
+      return
+
+    # De derecha a izquierda: mover el de la izquierda primero empuja al otro.
+    if self._show_details:
+      last_sash = len(self.body.panes()) - 2
+      self.body.sashpos(last_sash, max(total - self._details_width, 0))
+    if self._show_files:
+      self.body.sashpos(0, self._files_width)
+    self._sash_placed = True
 
   def _on_body_configure(self, event):
     # Los sash solo admiten una posicion cuando el panel ya tiene ancho real.
     if self._sash_placed or event.width <= 1:
       return
-    self._sash_placed = True
-    # De derecha a izquierda: mover el de la izquierda primero empuja al otro.
-    self.body.sashpos(1, event.width - METADATA_WIDTH)
-    self.body.sashpos(0, SIDEBAR_WIDTH)
+    self._place_sashes()
 
   def _build_actions(self):
     """Barra inferior de acciones sobre la imagen que se esta viendo."""
@@ -144,17 +184,22 @@ class MainView(tk.Tk):
     self.files_header = ttk.Label(sidebar, text="Carpeta", padding=(2, 6))
     self.files_header.pack(side=tk.TOP, fill=tk.X)
 
-    scrollbar = ttk.Scrollbar(sidebar, orient=tk.VERTICAL)
+    framed = _bordered(sidebar)
+    scrollbar = ttk.Scrollbar(framed, orient=tk.VERTICAL)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-    self.files_list = tk.Listbox(
-      sidebar,
-      activestyle="none",
-      borderwidth=0,
-      highlightthickness=0,
-      exportselection=False,
+    self.files_list = ttk.Treeview(
+      framed,
+      columns=FILE_COLUMNS,
+      show="headings",
+      selectmode="browse",
       yscrollcommand=scrollbar.set,
     )
+    for column, title, width, anchor in FILE_COLUMN_LAYOUT:
+      self.files_list.heading(column, text=title, anchor=tk.W)
+      self.files_list.column(
+        column, width=width, minwidth=width - 20, anchor=anchor, stretch=column == "name"
+      )
     self.files_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.configure(command=self.files_list.yview)
 
@@ -165,12 +210,13 @@ class MainView(tk.Tk):
 
     ttk.Label(panel, text="Detalles", padding=(2, 6)).pack(side=tk.TOP, fill=tk.X)
 
-    scrollbar = ttk.Scrollbar(panel, orient=tk.VERTICAL)
+    framed = _bordered(panel)
+    scrollbar = ttk.Scrollbar(framed, orient=tk.VERTICAL)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
     # Un arbol de dos columnas agrupa los datos por seccion sin widgets extra.
     self.metadata_tree = ttk.Treeview(
-      panel,
+      framed,
       columns=("valor",),
       show="tree",
       selectmode="browse",
@@ -282,7 +328,13 @@ class MainView(tk.Tk):
     if self._file_position is not None:
       position, total = self._file_position
       parts.append(f"{position} de {total}")
+    if self._folder_total:
+      parts.append(f"{self._folder_total} en la carpeta")
     self.status.configure(text="  |  ".join(parts))
+
+  def set_folder_total(self, total):
+    """Peso sumado de los archivos que se estan listando."""
+    self._folder_total = total
 
   # --- API que usa el controlador ---
 
@@ -308,6 +360,36 @@ class MainView(tk.Tk):
 
   def close(self):
     self.destroy()
+
+  def set_panel_widths(self, files_width, details_width):
+    self._files_width = files_width or SIDEBAR_WIDTH
+    self._details_width = details_width or METADATA_WIDTH
+    # Los sash pueden estar ya colocados con los valores por defecto: si no
+    # los recolocamos aqui, el ancho recuperado no se veria nunca.
+    self._place_sashes()
+
+  def set_panels_visible(self, show_files, show_details):
+    if (show_files, show_details) == (self._show_files, self._show_details):
+      return
+    # Guardamos los anchos actuales antes de rearmar: al ocultar un panel su
+    # sash desaparece y con el se iria la medida que el usuario habia elegido.
+    self._remember_widths()
+    self._show_files = show_files
+    self._show_details = show_details
+    self._arrange_panes()
+
+  def panel_widths(self):
+    self._remember_widths()
+    return self._files_width, self._details_width
+
+  def _remember_widths(self):
+    total = self.body.winfo_width()
+    if total <= 1:
+      return
+    if self._show_files:
+      self._files_width = self.body.sashpos(0)
+    if self._show_details:
+      self._details_width = total - self.body.sashpos(len(self.body.panes()) - 2)
 
   def show_settings(self, values, on_change):
     """Abre la modal de ajustes, o trae al frente la que ya estaba abierta."""
@@ -381,17 +463,17 @@ class MainView(tk.Tk):
     )
 
   def bind_select_file(self, handler):
-    """El handler recibe el indice elegido en la lista."""
+    """El handler recibe el indice elegido en la tabla."""
 
     def on_select(_event):
       # Ignoramos el evento cuando somos nosotros quienes movemos la seleccion.
       if self._syncing_list:
         return
-      selection = self.files_list.curselection()
+      selection = self.files_list.selection()
       if selection:
-        handler(selection[0])
+        handler(int(selection[0]))
 
-    self.files_list.bind("<<ListboxSelect>>", on_select)
+    self.files_list.bind("<<TreeviewSelect>>", on_select)
 
   def ask_image_path(self):
     """Abre el dialogo de archivos y devuelve la ruta elegida (o None)."""
@@ -403,31 +485,46 @@ class MainView(tk.Tk):
     )
     return path or None
 
-  def show_file_list(self, names, current_index):
-    """Muestra los archivos de la carpeta y marca el que se esta viendo."""
+  def show_file_list(self, rows, current_index):
+    """Muestra la tabla de archivos y marca el que se esta viendo.
+
+    rows es [(nombre, tamano, modificado), ...] ya formateado.
+    """
     self._syncing_list = True
     try:
-      # Solo repoblamos si cambio la carpeta: evita el parpadeo al navegar.
-      if names != self._file_names:
-        self._file_names = list(names)
-        self.files_list.delete(0, tk.END)
-        if names:
-          self.files_list.insert(tk.END, *names)
-          # Carpeta nueva: devolvemos el foco a la lista, que es desde donde
+      # Solo repoblamos si cambio el contenido: evita el parpadeo al navegar.
+      if rows != self._file_names:
+        self._file_names = list(rows)
+        self.files_list.delete(*self.files_list.get_children())
+        for position, row in enumerate(rows):
+          self.files_list.insert("", tk.END, iid=str(position), values=row)
+        if rows:
+          # Carpeta nueva: devolvemos el foco a la tabla, que es desde donde
           # se navega. El dialogo de archivos se lo habia llevado.
           self.focus_file_list()
 
-      self.files_list.selection_clear(0, tk.END)
-      if 0 <= current_index < len(names):
-        self.files_list.selection_set(current_index)
-        self.files_list.see(current_index)
-        self._file_position = (current_index + 1, len(names))
+      if 0 <= current_index < len(rows):
+        item = str(current_index)
+        self.files_list.selection_set(item)
+        self.files_list.see(item)
+        self._file_position = (current_index + 1, len(rows))
       else:
+        self.files_list.selection_remove(self.files_list.selection())
         self._file_position = None
     finally:
       self._syncing_list = False
 
-    self.files_header.configure(text=f"Carpeta  ({len(names)})" if names else "Carpeta")
+    self.files_header.configure(text=f"Carpeta  ({len(rows)})" if rows else "Carpeta")
+
+  def bind_sort(self, handler):
+    """Clic en una cabecera ordena por esa columna."""
+    for column, title, _width, _anchor in FILE_COLUMN_LAYOUT:
+      self.files_list.heading(column, command=lambda key=column: handler(key))
+
+  def set_sort_indicator(self, key, descending):
+    for column, title, _width, _anchor in FILE_COLUMN_LAYOUT:
+      arrow = SORT_ARROWS[descending] if column == key else ""
+      self.files_list.heading(column, text=title + arrow)
 
   def show_metadata(self, sections):
     """Vuelca [(titulo, [(campo, valor), ...])] en el panel de detalles."""
@@ -455,6 +552,7 @@ class MainView(tk.Tk):
     self._photo = None
     self.title(WINDOW_TITLE)
     self.status.configure(text="Listo")
+    self._folder_total = None
     self.show_file_list([], -1)
     self.show_metadata([])
     self._render()
@@ -462,6 +560,22 @@ class MainView(tk.Tk):
   def show_error(self, message):
     messagebox.showerror("Pics Viewer", message, parent=self)
     self.status.configure(text=message)
+
+
+def _bordered(parent):
+  """Contenedor con un borde de 1 px, para despegar el panel del visor.
+
+  Se hace con highlightthickness y no con relief porque en macOS el tema
+  nativo ignora el relieve de los frames.
+  """
+  frame = tk.Frame(
+    parent,
+    highlightthickness=1,
+    highlightbackground=BORDER_COLOR,
+    highlightcolor=BORDER_COLOR,
+  )
+  frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+  return frame
 
 
 # Tk borra las fuentes que se quedan sin referencias: la guardamos aparte.

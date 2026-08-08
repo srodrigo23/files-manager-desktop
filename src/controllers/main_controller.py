@@ -1,10 +1,16 @@
 from pathlib import Path
 
-from ..models.image_model import scan_folder
+from ..models.image_model import SORT_NAME, scan_folder
+from ..models.metadata import format_short_date, format_size
 from ..models.preferences import (
   CONFIRM_DELETE,
+  CYCLE_NAVIGATION,
   DEFAULT_SETTINGS,
+  DETAILS_WIDTH,
+  FILES_WIDTH,
   LAST_IMAGE,
+  SHOW_DETAILS,
+  SHOW_FILES,
   WINDOW_GEOMETRY,
 )
 
@@ -21,9 +27,14 @@ class MainController:
     # habilitan con Enter para que una flecha suelta no altere la imagen.
     self._actions_active = False
     self._active_path = None
+    self._sort_key = SORT_NAME
+    self._sort_descending = False
+    self._rows_cache = (None, [], 0)
 
     self.view.bind_open_image(self.on_open_image)
     self.view.bind_select_file(self.on_select_file)
+    self.view.bind_sort(self.on_sort_by)
+    self.view.set_sort_indicator(self._sort_key, self._sort_descending)
     self.view.bind_rotate(self.on_rotate_left, self.on_rotate_right)
     self.view.bind_delete(self.on_delete_image)
     self.view.bind_rename(self.on_rename_image)
@@ -39,6 +50,7 @@ class MainController:
       self.on_delete_image,
     )
     self.model.subscribe(self.on_model_changed)
+    self._restore_layout()
 
   def run(self):
     self.restore_session()
@@ -67,6 +79,9 @@ class MainController:
   def on_close(self):
     if self._preferences:
       self._preferences.set_value(WINDOW_GEOMETRY, self.view.current_geometry())
+      files_width, details_width = self.view.panel_widths()
+      self._preferences.set_value(FILES_WIDTH, str(files_width))
+      self._preferences.set_value(DETAILS_WIDTH, str(details_width))
     self.view.close()
 
   def on_open_image(self):
@@ -82,6 +97,40 @@ class MainController:
       return
     self._load(files[index])
 
+  def on_sort_by(self, key):
+    """Clic en cabecera: mismo criterio invierte, criterio nuevo empieza asc."""
+    if key == self._sort_key:
+      self._sort_descending = not self._sort_descending
+    else:
+      self._sort_key = key
+      self._sort_descending = False
+
+    self.view.set_sort_indicator(self._sort_key, self._sort_descending)
+    self.model.set_sort(self._sort_key, self._sort_descending)
+
+  def _folder_summary(self):
+    """(filas de la tabla, peso total) con una sola pasada de stats.
+
+    Cada archivo cuesta un stat y esto se llama en cada cambio de imagen: sin
+    cache una carpeta grande pagaria el recorrido entero al navegar.
+    """
+    files = tuple(self.model.files)
+    if self._rows_cache[0] != files:
+      rows = []
+      total = 0
+      for path in files:
+        stat = _safe_stat(path)
+        if stat is None:
+          # Archivo desaparecido entre el escaneo y ahora: no suma al total.
+          rows.append((path.name, "—", "—"))
+          continue
+        total += stat.st_size
+        rows.append((path.name, format_size(stat.st_size), format_short_date(stat.st_mtime)))
+      self._rows_cache = (files, rows, total)
+
+    _files, rows, total = self._rows_cache
+    return rows, (format_size(total) if rows else None)
+
   def on_previous_image(self):
     self._step(-1)
 
@@ -89,14 +138,20 @@ class MainController:
     self._step(1)
 
   def _step(self, delta):
-    """Salta a la imagen vecina. Se detiene en los extremos, no da la vuelta."""
+    """Salta a la imagen vecina, dando la vuelta si el ajuste lo permite."""
     files = self.model.files
     index = self.model.index
     if index < 0:
       return
 
     target = index + delta
-    if 0 <= target < len(files):
+    if self._settings[CYCLE_NAVIGATION]:
+      target %= len(files)
+    elif not 0 <= target < len(files):
+      return
+
+    # Con una sola imagen la vuelta cae en si misma: no vale releerla.
+    if target != index:
       self._load(files[target])
 
   def on_activate_actions(self):
@@ -134,6 +189,19 @@ class MainController:
     self._settings[key] = value
     if self._preferences:
       self._preferences.set_flag(key, value)
+    if key in (SHOW_FILES, SHOW_DETAILS):
+      self._apply_panels()
+
+  def _restore_layout(self):
+    if self._preferences:
+      self.view.set_panel_widths(
+        _as_int(self._preferences.get_value(FILES_WIDTH)),
+        _as_int(self._preferences.get_value(DETAILS_WIDTH)),
+      )
+    self._apply_panels()
+
+  def _apply_panels(self):
+    self.view.set_panels_visible(self._settings[SHOW_FILES], self._settings[SHOW_DETAILS])
 
   def _load_settings(self):
     if self._preferences is None:
@@ -199,7 +267,9 @@ class MainController:
       self._active_path = model.path
       self._set_actions_active(False)
 
-    self.view.show_file_list([path.name for path in model.files], model.index)
+    rows, total = self._folder_summary()
+    self.view.show_file_list(rows, model.index)
+    self.view.set_folder_total(total)
     self.view.show_metadata(model.metadata)
     self.view.show_image(model.image, model.path.name, model.rotation)
 
@@ -217,9 +287,24 @@ class MainController:
       if not quiet:
         self.view.show_error(f"No se pudo abrir la imagen:\n{error}")
         # La lista quedo marcando el archivo fallido: la devolvemos al actual.
-        self.view.show_file_list([item.name for item in self.model.files], self.model.index)
+        self.view.show_file_list(self._folder_summary()[0], self.model.index)
       return False
 
   def _remember_current(self):
     if self._preferences and self.model.path:
       self._preferences.set_value(LAST_IMAGE, str(self.model.path))
+
+
+def _safe_stat(path):
+  try:
+    return path.stat()
+  except OSError:
+    return None
+
+
+def _as_int(value):
+  """Los ajustes se guardan como texto: un valor corrupto no debe romper nada."""
+  try:
+    return int(value)
+  except (TypeError, ValueError):
+    return None
