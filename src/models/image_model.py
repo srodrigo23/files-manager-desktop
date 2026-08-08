@@ -24,6 +24,13 @@ SORT_NAME = "name"
 SORT_SIZE = "size"
 SORT_MODIFIED = "modified"
 
+# Lado maximo de las miniaturas de la grilla.
+THUMBNAIL_BOX = 240
+THUMBNAIL_CACHE_LIMIT = 200
+# Tope de miniaturas a generar: mas alla la grilla deja de ser legible y el
+# coste de leerlas del disco se nota al redibujar.
+MAX_GRID_ITEMS = 36
+
 # Grados en sentido horario -> operacion de Pillow. transpose es exacto y
 # barato: no reinterpola pixeles como lo haria rotate().
 _ROTATIONS = {
@@ -49,6 +56,7 @@ class ImageModel:
     # El orden no se recuerda entre sesiones: cada arranque empieza por nombre.
     self._sort_key = SORT_NAME
     self._sort_descending = False
+    self._thumbnail_cache = {}
     self._observers = []
 
   @property
@@ -146,6 +154,8 @@ class ImageModel:
       return
     self._rotation = (self._rotation + degrees) % 360
     self._rotated = None
+    # La miniatura de la grilla lleva la rotacion aplicada: queda obsoleta.
+    self._thumbnail_cache.pop(self._path, None)
     if self._preferences:
       self._preferences.save_rotation(self._path, self._rotation)
     self._notify()
@@ -176,6 +186,7 @@ class ImageModel:
 
     previous = self._path
     previous.rename(target)
+    self._thumbnail_cache.pop(previous, None)
 
     # La rotacion guardada esta indexada por ruta: la mudamos con el archivo.
     if self._preferences and self._rotation:
@@ -188,28 +199,76 @@ class ImageModel:
     self._notify()
     return target
 
-  def send_to_trash(self):
-    """Manda el archivo abierto a la papelera del sistema.
+  def thumbnails(self, paths, box=THUMBNAIL_BOX):
+    """Miniaturas [(nombre, imagen)] para la grilla, con la rotacion aplicada.
 
-    Devuelve la ruta que toca abrir a continuacion, o None si la carpeta se
-    quedo sin imagenes. No abre nada: eso lo decide el controlador, que es
-    quien sabe como reportar un fallo de lectura.
+    Se cachean por ruta: la grilla se redibuja en cada resize y releer el
+    disco cada vez seria inaceptable.
     """
-    if self._path is None:
+    items = []
+    for path in paths:
+      thumbnail = self._thumbnail_cache.get(path)
+      if thumbnail is None:
+        thumbnail = self._build_thumbnail(path, box)
+        if thumbnail is None:
+          continue
+        # Tope simple para que la cache no crezca sin limite en carpetas grandes.
+        if len(self._thumbnail_cache) > THUMBNAIL_CACHE_LIMIT:
+          self._thumbnail_cache.clear()
+        self._thumbnail_cache[path] = thumbnail
+      items.append((path.name, thumbnail))
+    return items
+
+  def _build_thumbnail(self, path, box):
+    try:
+      with Image.open(path) as source:
+        # draft deja que el decodificador JPEG salte a una escala menor: es
+        # varias veces mas rapido que decodificar entero y luego reducir.
+        source.draft("RGB", (box, box))
+        image = ImageOps.exif_transpose(source)
+        image = image.convert("RGBA") if image.mode not in ("RGB", "RGBA", "L") else image
+        rotation = self._preferences.rotation_for(path) if self._preferences else 0
+        if rotation:
+          image = image.transpose(_ROTATIONS[rotation])
+        image.thumbnail((box, box), Image.LANCZOS)
+        return image
+    except (OSError, ValueError):
       return None
+
+  def send_to_trash(self, paths=None):
+    """Manda a la papelera las rutas dadas, o la imagen abierta si no hay.
+
+    Devuelve (siguiente_a_abrir, fallidas). No abre nada: eso lo decide el
+    controlador, que es quien sabe como reportar un fallo de lectura.
+    """
+    targets = list(paths) if paths else ([self._path] if self._path else [])
+    if not targets:
+      return None, []
 
     index = max(self.index, 0)
-    send2trash(self._path)
-    if self._preferences:
-      self._preferences.forget(self._path)
+    removed = []
+    failed = []
+    for target in targets:
+      try:
+        send2trash(target)
+      except OSError:
+        # Una que falla no debe abortar el resto del lote.
+        failed.append(target.name)
+        continue
+      removed.append(target)
+      if self._preferences:
+        self._preferences.forget(target)
+      self._thumbnail_cache.pop(target, None)
 
-    self._files = [item for item in self._files if item != self._path]
+    self._files = [item for item in self._files if item not in set(removed)]
     if not self._files:
-      return None
+      return None, failed
 
-    # Al quitar el actual, esa posicion ya la ocupa el siguiente. Si borramos
-    # el ultimo, retrocedemos al que quedo al final.
-    return self._files[min(index, len(self._files) - 1)]
+    # Si la imagen abierta sobrevivio al lote, seguimos en ella. Si no, esa
+    # posicion ya la ocupa la siguiente; y si borramos la ultima, la anterior.
+    if self._path in self._files:
+      return self._path, failed
+    return self._files[min(index, len(self._files) - 1)], failed
 
   def load_at(self, index):
     """Carga la imagen que ocupa esa posicion en files."""
@@ -224,6 +283,7 @@ class ImageModel:
     self._metadata = []
     self._directory = None
     self._files = []
+    self._thumbnail_cache.clear()
     self._notify()
 
   def _notify(self):

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ..models.image_model import SORT_NAME, scan_folder
+from ..models.image_model import MAX_GRID_ITEMS, SORT_NAME, scan_folder
 from ..models.metadata import format_short_date, format_size
 from ..models.preferences import (
   CONFIRM_DELETE,
@@ -30,6 +30,11 @@ class MainController:
     self._sort_key = SORT_NAME
     self._sort_descending = False
     self._rows_cache = (None, [], 0)
+    # Rutas marcadas con la casilla. Se guardan como rutas y no como indices
+    # porque reordenar la tabla cambia los indices pero no la seleccion.
+    self._checked = set()
+    self._anchor = None
+    self._base_checked = set()
 
     self.view.bind_open_image(self.on_open_image)
     self.view.bind_select_file(self.on_select_file)
@@ -41,6 +46,14 @@ class MainController:
     self.view.bind_settings(self.on_open_settings)
     self.view.bind_close(self.on_close)
     self.view.bind_navigation(self.on_previous_image, self.on_next_image)
+    self.view.bind_check(self.on_toggle_check, self.on_toggle_all_checks)
+    self.view.bind_selection_keys(
+      self.on_extend_up,
+      self.on_extend_down,
+      self.on_toggle_current,
+      self.on_clear_checks,
+      self.on_selection_run_end,
+    )
     self.view.bind_actions(
       self.on_activate_actions,
       self.on_cancel_actions,
@@ -131,6 +144,92 @@ class MainController:
     _files, rows, total = self._rows_cache
     return rows, (format_size(total) if rows else None)
 
+  # --- Seleccion multiple ---
+
+  def on_toggle_check(self, index):
+    files = self.model.files
+    if not 0 <= index < len(files):
+      return
+    path = files[index]
+    self._checked.symmetric_difference_update({path})
+    # Marcar a mano abre un tramo nuevo desde aqui.
+    self._start_selection_run(index)
+    self._refresh_selection()
+
+  def on_toggle_current(self):
+    self.on_toggle_check(self.model.index)
+
+  def on_toggle_all_checks(self):
+    files = self.model.files
+    # Si ya estaban todas, el mismo clic deselecciona: es el comportamiento
+    # esperado de una casilla de cabecera.
+    self._checked = set() if self._checked >= set(files) and files else set(files)
+    self._start_selection_run(self.model.index)
+    self._refresh_selection()
+
+  def on_selection_run_end(self):
+    """Soltar Shift cierra el tramo: el proximo arranca un grupo nuevo."""
+    self._anchor = None
+
+  def on_clear_checks(self):
+    self._checked = set()
+    self._anchor = None
+    self._base_checked = set()
+    self._refresh_selection()
+
+  def on_extend_up(self):
+    self._extend(-1)
+
+  def on_extend_down(self):
+    self._extend(1)
+
+  def _extend(self, delta):
+    """Shift+flecha: invierte el marcado del tramo entre el ancla y el cursor.
+
+    Recalcular el tramo entero contra el estado que habia al empezar, en vez
+    de ir sumando, da las dos cosas: cambiar de sentido deshace lo recien
+    hecho, y volver a recorrer un tramo ya marcado lo desmarca.
+    """
+    files = self.model.files
+    index = self.model.index
+    if index < 0:
+      return
+
+    if self._anchor is None:
+      self._start_selection_run(index)
+
+    target = index + delta
+    if not 0 <= target < len(files):
+      return
+
+    low, high = sorted((self._anchor, target))
+    # Diferencia simetrica, no union: pasar por encima de algo ya marcado lo
+    # desmarca, como en Total Commander. Lo de fuera del tramo no se toca.
+    self._checked = set(self._base_checked) ^ set(files[low : high + 1])
+    # Mover el cursor recarga la imagen, y eso redibuja tabla y grilla.
+    self._load(files[target])
+
+  def _start_selection_run(self, index):
+    self._anchor = index
+    self._base_checked = set(self._checked)
+
+  def _refresh_selection(self):
+    """Sincroniza casillas y visor con el conjunto marcado."""
+    files = self.model.files
+    checked_indexes = {
+      position for position, path in enumerate(files) if path in self._checked
+    }
+    self.view.set_checked(checked_indexes, bool(files) and len(checked_indexes) == len(files))
+
+    ordered = [path for path in files if path in self._checked]
+    if ordered:
+      self.view.show_grid(self.model.thumbnails(ordered[:MAX_GRID_ITEMS]), len(ordered))
+    else:
+      # Sin marcadas volvemos al visor de una sola imagen.
+      self.view.show_grid([], 0)
+      if self.model.has_image:
+        self.view.show_image(self.model.image, self.model.path.name, self.model.rotation)
+
   def on_previous_image(self):
     self._step(-1)
 
@@ -149,6 +248,10 @@ class MainController:
       target %= len(files)
     elif not 0 <= target < len(files):
       return
+
+    # Navegar sin Shift cierra el tramo: el proximo Shift arranca de cero.
+    self._anchor = None
+    self._base_checked = set()
 
     # Con una sola imagen la vuelta cae en si misma: no vale releerla.
     if target != index:
@@ -235,18 +338,25 @@ class MainController:
       self._set_actions_active(True)
 
   def on_delete_image(self):
-    if not self.model.has_image:
+    """Elimina las marcadas; si no hay ninguna, la que se esta viendo."""
+    targets = [path for path in self.model.files if path in self._checked]
+    if not targets:
+      targets = [self.model.path] if self.model.has_image else []
+    if not targets:
       return
 
-    name = self.model.path.name
-    if self._settings[CONFIRM_DELETE] and not self.view.confirm_delete(name):
+    if self._settings[CONFIRM_DELETE] and not self.view.confirm_delete(
+      [path.name for path in targets]
+    ):
       return
 
-    try:
-      following = self.model.send_to_trash()
-    except OSError as error:
-      self.view.show_error(f"No se pudo mover «{name}» a la papelera:\n{error}")
-      return
+    following, failed = self.model.send_to_trash(targets)
+    self._checked.difference_update(targets)
+    self._anchor = None
+    self._base_checked = set()
+
+    if failed:
+      self.view.show_error("No se pudieron mover a la papelera:\n" + "\n".join(failed))
 
     # Si no queda nada que abrir, o lo que sigue no se puede leer, dejamos el
     # visor limpio en vez de seguir mostrando un archivo que ya no existe.
@@ -272,6 +382,9 @@ class MainController:
     self.view.set_folder_total(total)
     self.view.show_metadata(model.metadata)
     self.view.show_image(model.image, model.path.name, model.rotation)
+    # Repoblar la tabla borra las casillas y el visor volvio a la imagen sola:
+    # esto devuelve ambos al estado que corresponde a la seleccion actual.
+    self._refresh_selection()
 
   def _load(self, path, quiet=False):
     """Carga la imagen. Devuelve False si no se pudo leer.

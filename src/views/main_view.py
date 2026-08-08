@@ -1,10 +1,11 @@
 import re
 import tkinter as tk
+from math import ceil, sqrt
 from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageTk
 
-from ..models.image_model import SUPPORTED_EXTENSIONS
+from ..models.image_model import MAX_GRID_ITEMS, SUPPORTED_EXTENSIONS
 from . import icons
 from .settings_dialog import SettingsDialog
 from .widgets import IconButton
@@ -20,19 +21,28 @@ BORDER_COLOR = "#c3c3c3"
 EMPTY_TEXT_COLOR = "#8a8a8a"
 CANVAS_PADDING = 12
 SIDEBAR_WIDTH = 350
-FILE_COLUMNS = ("name", "size", "modified")
+CHECK_COLUMN = "check"
+FILE_COLUMNS = (CHECK_COLUMN, "name", "size", "modified")
 # (columna, titulo, ancho, alineacion)
 FILE_COLUMN_LAYOUT = (
-  ("name", "Nombre", 165, tk.W),
-  ("size", "Tamaño", 75, tk.E),
-  ("modified", "Modificado", 90, tk.CENTER),
+  (CHECK_COLUMN, "", 30, tk.CENTER),
+  ("name", "Nombre", 150, tk.W),
+  ("size", "Tamaño", 70, tk.E),
+  ("modified", "Modificado", 85, tk.CENTER),
 )
+SORTABLE_COLUMNS = tuple(item for item in FILE_COLUMN_LAYOUT if item[0] != CHECK_COLUMN)
 SORT_ARROWS = {True: "  ▼", False: "  ▲"}
+
+CHECKED = "☑"
+UNCHECKED = "☐"
+
+GRID_GAP = 10
+GRID_LABEL_HEIGHT = 16
 METADATA_WIDTH = 320
 ACTION_ICON_TINT = "#ffffff"
 DANGER_COLORS = ("#c5453c", "#d65a50", "#a3332c")
 NEUTRAL_COLORS = ("#6b7280", "#7d8592", "#565c66")
-HINT_INACTIVE = "↑ ↓ cambiar imagen    ·    supr eliminar    ·    Enter activa la rotación"
+HINT_INACTIVE = "↑↓ cambiar    ·    Shift+↑↓ seleccionar    ·    espacio marcar    ·    supr eliminar    ·    Enter rotación"
 HINT_ACTIVE = "← → rotar    ·    supr eliminar    ·    Esc salir"
 # Espera antes de re-escalar mientras el usuario arrastra el borde de la ventana.
 RESIZE_DELAY_MS = 60
@@ -57,6 +67,10 @@ class MainView(tk.Tk):
     self._file_names = []
     self._file_position = None
     self._folder_total = None
+    self._grid_items = []
+    self._grid_photos = []
+    self._grid_total = 0
+    self._actions_active = False
     self._rotation = 0
     self._syncing_list = False
     self._sash_placed = False
@@ -295,6 +309,12 @@ class MainView(tk.Tk):
     if width <= 1 or height <= 1:
       return
 
+    # Con imagenes marcadas el visor pasa a ser una grilla: se esta trabajando
+    # sobre un conjunto, no sobre una sola imagen.
+    if self._grid_items:
+      self._render_grid(width, height)
+      return
+
     if self._source_image is None:
       self.canvas.create_text(
         width // 2, height // 2, text=EMPTY_MESSAGE, fill=EMPTY_TEXT_COLOR
@@ -306,10 +326,48 @@ class MainView(tk.Tk):
     self.canvas.create_image(width // 2, height // 2, image=self._photo)
     self._update_status(zoom)
 
+  def _render_grid(self, width, height):
+    items = self._grid_items[:MAX_GRID_ITEMS]
+    columns = ceil(sqrt(len(items)))
+    rows = ceil(len(items) / columns)
+
+    cell_width = (width - GRID_GAP) / columns - GRID_GAP
+    cell_height = (height - GRID_GAP) / rows - GRID_GAP
+    if cell_width < 20 or cell_height < 20 + GRID_LABEL_HEIGHT:
+      return
+
+    self._grid_photos = []
+    for position, (name, image) in enumerate(items):
+      column, row = position % columns, position // columns
+      center_x = GRID_GAP + column * (cell_width + GRID_GAP) + cell_width / 2
+      top = GRID_GAP + row * (cell_height + GRID_GAP)
+
+      scaled, _zoom = self._fit_box(image, cell_width, cell_height - GRID_LABEL_HEIGHT)
+      photo = ImageTk.PhotoImage(scaled)
+      self._grid_photos.append(photo)  # sin referencia, tkinter las descarta
+
+      self.canvas.create_image(
+        center_x, top + (cell_height - GRID_LABEL_HEIGHT) / 2, image=photo
+      )
+      self.canvas.create_text(
+        center_x,
+        top + cell_height - GRID_LABEL_HEIGHT / 2,
+        text=_ellipsize(name, cell_width),
+        fill=EMPTY_TEXT_COLOR,
+        font=("Helvetica", 10),
+      )
+
+    self._update_grid_status(len(items))
+
   def _fit(self, image, available_width, available_height):
     """Devuelve la imagen ajustada al canvas y el factor de escala aplicado."""
-    max_width = max(available_width - 2 * CANVAS_PADDING, 1)
-    max_height = max(available_height - 2 * CANVAS_PADDING, 1)
+    return self._fit_box(
+      image, available_width - 2 * CANVAS_PADDING, available_height - 2 * CANVAS_PADDING
+    )
+
+  def _fit_box(self, image, max_width, max_height):
+    max_width = max(int(max_width), 1)
+    max_height = max(int(max_height), 1)
     width, height = image.size
 
     # Solo reducimos: una imagen pequena se ve a tamano real, no pixelada.
@@ -332,9 +390,29 @@ class MainView(tk.Tk):
       parts.append(f"{self._folder_total} en la carpeta")
     self.status.configure(text="  |  ".join(parts))
 
+  def _update_grid_status(self, shown):
+    seleccion = "1 imagen seleccionada" if self._grid_total == 1 else f"{self._grid_total} imágenes seleccionadas"
+    parts = [seleccion]
+    if shown < self._grid_total:
+      parts.append(f"mostrando {shown}")
+    if self._folder_total:
+      parts.append(f"{self._folder_total} en la carpeta")
+    self.status.configure(text="  |  ".join(parts))
+
   def set_folder_total(self, total):
     """Peso sumado de los archivos que se estan listando."""
     self._folder_total = total
+
+  def show_grid(self, items, total):
+    """Dibuja la grilla de seleccionadas. Con lista vacia vuelve al visor."""
+    if items == self._grid_items and total == self._grid_total:
+      return
+    self._grid_items = list(items)
+    self._grid_total = total
+    if not items:
+      self._grid_photos = []
+    self._update_hint()
+    self._render()
 
   # --- API que usa el controlador ---
 
@@ -418,6 +496,19 @@ class MainView(tk.Tk):
     self._bind_key("<Up>", on_previous)
     self._bind_key("<Down>", on_next)
 
+  def bind_selection_keys(self, on_extend_up, on_extend_down, on_toggle, on_clear, on_run_end):
+    """Seleccion solo con teclado: Shift+flechas extiende, espacio marca."""
+    self._bind_key("<Shift-Up>", on_extend_up)
+    self._bind_key("<Shift-Down>", on_extend_down)
+    self._bind_key("<space>", on_toggle)
+    self._bind_key("<Shift-Escape>", on_clear)
+
+    # Soltar Shift cierra el tramo. Sin esto, volver a pulsarlo seguiria
+    # midiendo desde el ancla vieja y no se podrian hacer grupos separados.
+    for released in ("<KeyRelease-Shift_L>", "<KeyRelease-Shift_R>"):
+      self.bind(released, lambda _event: on_run_end())
+      self.files_list.bind(released, lambda _event: on_run_end())
+
   def bind_actions(self, on_activate, on_cancel, on_rotate_left, on_rotate_right, on_delete):
     """Enter habilita las acciones sobre la imagen; Esc vuelve atras."""
     self._bind_key("<Return>", on_activate)
@@ -431,7 +522,16 @@ class MainView(tk.Tk):
     self._bind_key("<BackSpace>", on_delete)
 
   def set_actions_active(self, active):
-    self.actions_hint.configure(text=HINT_ACTIVE if active else HINT_INACTIVE)
+    self._actions_active = active
+    self._update_hint()
+
+  def _update_hint(self):
+    # Con seleccion las teclas hacen otra cosa: la ayuda debe decir cual.
+    if self._grid_total:
+      text = f"supr elimina las {self._grid_total} seleccionadas    ·    Shift+Esc limpia"
+    else:
+      text = HINT_ACTIVE if self._actions_active else HINT_INACTIVE
+    self.actions_hint.configure(text=text)
 
   def focus_file_list(self):
     self.files_list.focus_set()
@@ -451,12 +551,21 @@ class MainView(tk.Tk):
     self.bind(sequence, callback)
     self.files_list.bind(sequence, callback)
 
-  def confirm_delete(self, name):
-    """Pide confirmacion antes de mandar el archivo a la papelera."""
+  def confirm_delete(self, names):
+    """Pide confirmacion antes de mandar a la papelera una o varias imagenes."""
+    if len(names) == 1:
+      question = f"¿Mover «{names[0]}» a la papelera?"
+    else:
+      # Con muchas, listarlas todas haria un dialogo ilegible: mostramos una
+      # muestra y el total, que es lo que hace falta para decidir.
+      sample = "\n".join(names[:8])
+      extra = f"\n… y {len(names) - 8} más" if len(names) > 8 else ""
+      question = f"¿Mover {len(names)} imágenes a la papelera?\n\n{sample}{extra}"
+
     return messagebox.askyesno(
-      "Eliminar imagen",
-      f"¿Mover «{name}» a la papelera?",
-      detail="Podras recuperarlo desde la papelera del sistema.",
+      "Eliminar imagen" if len(names) == 1 else "Eliminar imágenes",
+      question,
+      detail="Podras recuperarlas desde la papelera del sistema.",
       icon=messagebox.WARNING,
       default=messagebox.NO,
       parent=self,
@@ -497,7 +606,7 @@ class MainView(tk.Tk):
         self._file_names = list(rows)
         self.files_list.delete(*self.files_list.get_children())
         for position, row in enumerate(rows):
-          self.files_list.insert("", tk.END, iid=str(position), values=row)
+          self.files_list.insert("", tk.END, iid=str(position), values=(UNCHECKED, *row))
         if rows:
           # Carpeta nueva: devolvemos el foco a la tabla, que es desde donde
           # se navega. El dialogo de archivos se lo habia llevado.
@@ -518,13 +627,38 @@ class MainView(tk.Tk):
 
   def bind_sort(self, handler):
     """Clic en una cabecera ordena por esa columna."""
-    for column, title, _width, _anchor in FILE_COLUMN_LAYOUT:
+    for column, _title, _width, _anchor in SORTABLE_COLUMNS:
       self.files_list.heading(column, command=lambda key=column: handler(key))
 
   def set_sort_indicator(self, key, descending):
-    for column, title, _width, _anchor in FILE_COLUMN_LAYOUT:
+    for column, title, _width, _anchor in SORTABLE_COLUMNS:
       arrow = SORT_ARROWS[descending] if column == key else ""
       self.files_list.heading(column, text=title + arrow)
+
+  def bind_check(self, on_toggle_row, on_toggle_all):
+    """Marcado con raton: clic en la casilla de una fila o en la cabecera."""
+    self.files_list.heading(CHECK_COLUMN, command=on_toggle_all)
+
+    def on_click(event):
+      if self.files_list.identify_region(event.x, event.y) != "cell":
+        return None
+      if self.files_list.identify_column(event.x) != f"#{FILE_COLUMNS.index(CHECK_COLUMN) + 1}":
+        return None
+      item = self.files_list.identify_row(event.y)
+      if not item:
+        return None
+      # break: marcar no debe cambiar la imagen que se esta viendo.
+      on_toggle_row(int(item))
+      return "break"
+
+    self.files_list.bind("<Button-1>", on_click)
+
+  def set_checked(self, checked_indexes, all_checked):
+    """Refleja el marcado: casillas de las filas y de la cabecera."""
+    for position in range(len(self._file_names)):
+      glyph = CHECKED if position in checked_indexes else UNCHECKED
+      self.files_list.set(str(position), CHECK_COLUMN, glyph)
+    self.files_list.heading(CHECK_COLUMN, text=CHECKED if all_checked else UNCHECKED)
 
   def show_metadata(self, sections):
     """Vuelca [(titulo, [(campo, valor), ...])] en el panel de detalles."""
@@ -553,6 +687,8 @@ class MainView(tk.Tk):
     self.title(WINDOW_TITLE)
     self.status.configure(text="Listo")
     self._folder_total = None
+    self._grid_items = []
+    self._grid_photos = []
     self.show_file_list([], -1)
     self.show_metadata([])
     self._render()
@@ -560,6 +696,15 @@ class MainView(tk.Tk):
   def show_error(self, message):
     messagebox.showerror("Pics Viewer", message, parent=self)
     self.status.configure(text=message)
+
+
+def _ellipsize(name, available_width):
+  """Recorta el nombre por el medio para que quepa bajo su miniatura."""
+  characters = max(int(available_width // 6), 6)
+  if len(name) <= characters:
+    return name
+  half = (characters - 1) // 2
+  return f"{name[:half]}…{name[-half:]}"
 
 
 def _bordered(parent):
